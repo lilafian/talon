@@ -76,7 +76,7 @@ def parse_args(argv=None):
 		"--config",
 		dest="config",
 		metavar="PATH",
-		help="Pass a custom WinUtil configuration to use instead of the default Talon configuration.",
+		help="Pass a custom config file to use instead of the default Talon configuration.",
 	)
 	for slug, _, _ in DEBLOAT_STEPS:
 		dest = f"skip_{slug.replace('-', '_')}_step"
