@@ -1,4 +1,5 @@
 import os
+import ctypes
 import subprocess
 import sys
 import threading
@@ -7,7 +8,7 @@ from screens import load as load_screen
 from utilities.util_logger import logger
 from utilities.util_error_popup import show_error_popup
 from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import QObject, QEvent, QTimer, QMetaObject, Qt, Q_ARG, pyqtSignal
+from PyQt5.QtCore import QObject, QEvent, QTimer, Qt, pyqtSignal
 from utilities.util_admin_check import ensure_admin
 from utilities.util_internet_check import ensure_internet
 import preinstall_components.pre_checks as pre_checks
@@ -21,8 +22,6 @@ from ui_components.ui_base_full import UIBaseFull
 from ui_components.ui_header_text import UIHeaderText
 from ui_components.ui_title_text import UITitleText
 from ui_components.ui_loading_spinner import UILoadingSpinner
-
-
 
 _INSTALL_UI_BASE = None
 DEBLOAT_STEPS = [
@@ -58,8 +57,6 @@ DEBLOAT_STEPS = [
 	),
 ]
 
-
-
 def parse_args(argv=None):
 	parser = argparse.ArgumentParser(description="Talon installer")
 	parser.add_argument(
@@ -87,8 +84,6 @@ def parse_args(argv=None):
 			help=f"Skip the {slug.replace('-', ' ')} step",
 		)
 	return parser.parse_args(argv)
-
-
 
 def run_screen(module_name: str):
 	logger.debug(f"Launching screen: {module_name}")
@@ -122,8 +117,6 @@ def run_screen(module_name: str):
 			allow_continue=False,
 		)
 		sys.exit(1)
-
-
 
 def _build_install_ui():
 	app = QApplication.instance() or QApplication(sys.argv)
@@ -167,17 +160,13 @@ def _build_install_ui():
 		set_msg = pyqtSignal(str)
 	bus = _SpinnerBus()
 	bus.start.connect(spinner.start, Qt.QueuedConnection)
-     
 	bus.stop.connect(spinner.stop, Qt.QueuedConnection)
 	bus.raiseit.connect(spinner.raise_, Qt.QueuedConnection)
 	bus.set_msg.connect(status_label.setText, Qt.QueuedConnection)
-
 	base.show()
 	status_label.raise_()
 	spinner.raise_()
 	return app, status_label, base, spinner, bus
-
-
 
 def _update_status(bus, label: UIHeaderText, message: str):
 	if label is None:
@@ -186,13 +175,48 @@ def _update_status(bus, label: UIHeaderText, message: str):
 	bus.set_msg.emit(message)
 	bus.raiseit.emit()
 
+def _enable_shutdown_privilege():
+	advapi32 = ctypes.windll.advapi32
+	kernel32 = ctypes.windll.kernel32
+	token = ctypes.c_void_p()
+	if not advapi32.OpenProcessToken(kernel32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(token)):
+		raise ctypes.WinError()
+	try:
+		luid = ctypes.c_longlong()
+		if not advapi32.LookupPrivilegeValueW(None, "SeShutdownPrivilege", ctypes.byref(luid)):
+			raise ctypes.WinError()
+		class LUID_AND_ATTRIBUTES(ctypes.Structure):
+			_fields_ = [("Luid", ctypes.c_longlong), ("Attributes", ctypes.c_ulong)]
+		class TOKEN_PRIVILEGES(ctypes.Structure):
+			_fields_ = [("PrivilegeCount", ctypes.c_ulong), ("Privileges", LUID_AND_ATTRIBUTES * 1)]
+		tp = TOKEN_PRIVILEGES()
+		tp.PrivilegeCount = 1
+		tp.Privileges[0].Luid = luid.value
+		tp.Privileges[0].Attributes = 0x00000002
+		if not advapi32.AdjustTokenPrivileges(token, False, ctypes.byref(tp), 0, None, None):
+			raise ctypes.WinError()
+	finally:
+		kernel32.CloseHandle(token)
 
+def _restart_windows():
+	_enable_shutdown_privilege()
+	user32 = ctypes.windll.user32
+	if not user32.ExitWindowsEx(0x00000002, 0x80000000):
+		raise ctypes.WinError()
 
 def main(argv=None):
 	args = parse_args(argv)
 	if args.headless:
 		args.developer_mode = True
 		args.skip_browser_installation_step = True
+	if args.config:
+		config_path = os.path.abspath(args.config)
+		if not os.path.isfile(config_path):
+			msg = f"Config file not found: {config_path}"
+			logger.error(msg)
+			show_error_popup(msg, allow_continue=False)
+			sys.exit(1)
+		args.config = config_path
 	ensure_admin()
 	pre_checks.main()
 	if not args.headless:
@@ -225,8 +249,14 @@ def main(argv=None):
 				else:
 					func()
 			except Exception:
+				logger.exception("Debloat step failed")
 				if bus is not None:
 					bus.stop.emit()
+				if not args.headless:
+					show_error_popup(
+						"An unexpected error occurred during installation.\nCheck the log for details.",
+						allow_continue=False,
+					)
 				return
 		if args.headless:
 			_update_status(bus, status_label, "Suppressing system restart due to --headless flag used")
@@ -237,7 +267,15 @@ def main(argv=None):
 			_update_status(bus, status_label, "Restarting system...")
 			if bus is not None:
 				bus.stop.emit()
-			subprocess.call(["shutdown", "/r", "/t", "0"])
+			try:
+				_restart_windows()
+			except Exception as e:
+				logger.exception(f"Failed to restart system: {e}")
+				if not args.headless:
+					show_error_popup(
+						"Failed to restart the system.\nCheck the log for details.",
+						allow_continue=False,
+					)
 
 	if args.developer_mode or args.headless:
 		debloat_sequence()
@@ -246,8 +284,6 @@ def main(argv=None):
 			threading.Thread(target=debloat_sequence, daemon=True).start()
 		QTimer.singleShot(0, start_thread)
 		sys.exit(app.exec_())
-
-
 
 if __name__ == "__main__":
 	main()
